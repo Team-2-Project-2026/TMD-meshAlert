@@ -9,7 +9,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 
 export const StatusToolbar = () => {
-  const { isConnected, peers, me, ledgerIntegrity, isStealthMode, setStealthMode } = useMesh();
+  const { isConnected, peers, me, ledgerIntegrity, isStealthMode, setStealthMode, directPeerCount } = useMesh();
 
   return (
     <div className="flex items-center justify-between px-4 py-2 border-b border-white/10 bg-black/40 backdrop-blur-md">
@@ -33,6 +33,11 @@ export const StatusToolbar = () => {
         <div className="flex items-center gap-2 text-zinc-400">
           <Users className="w-4 h-4" />
           <span className="text-xs font-mono">{peers.length} Nearby</span>
+          {directPeerCount > 0 && (
+            <Badge variant="outline" className="bg-blue-500/10 border-blue-500/30 text-blue-400 font-mono text-[9px] px-1 py-0 h-4 uppercase">
+              {directPeerCount} P2P
+            </Badge>
+          )}
         </div>
         <div className="h-4 w-[1px] bg-white/10" />
         <div className="flex items-center gap-2">

@@ -8,6 +8,7 @@ import { PeersList } from '@/components/PeersList';
 import { Toaster } from '@/components/ui/sonner';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Radio, Map as MapIcon, Shield, Menu, MessageSquare, Users } from 'lucide-react';
+import { HostModePanel } from '@/components/HostModePanel';
 import { motion } from 'framer-motion';
 
 import { useMesh } from '@/lib/MeshContext';
@@ -33,6 +34,7 @@ function AppInner() {
           {/* Desktop Sidebar - Mesh Info / Resources */}
           <div className="hidden lg:flex flex-col w-[300px] shrink-0 gap-4">
              <SupportResources />
+             <HostModePanel />
              <div className="p-4 bg-zinc-950/50 border border-white/5 rounded-xl">
                 <h3 className="text-[10px] font-mono font-bold text-emerald-500 uppercase tracking-widest mb-2">Protocol Status</h3>
                 <div className="space-y-1.5">
