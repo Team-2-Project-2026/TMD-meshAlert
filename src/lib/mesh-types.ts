@@ -20,7 +20,7 @@ export interface MeshMessage {
   senderName: string;
   content: string;
   timestamp: number;
-  type: 'broadcast' | 'direct' | 'alert' | 'route';
+  type: 'broadcast' | 'direct' | 'alert' | 'route' | 'flag';
   hops: number;
   hash: string;
   prevHash: string;
@@ -37,7 +37,20 @@ export interface MeshMessage {
     isEncrypted?: boolean;
     iv?: string; // Initialization vector for AES-GCM
     wrappedKey?: string; // Content encryption key encrypted with the shared secret
+    channel?: string; // Named channel identifier, e.g. 'general', 'medical'
+    flagTarget?: string;  // messageId this flag is assessing
+    flagVote?: 'confirm' | 'dispute';
   };
+}
+
+export interface FlagEntry {
+  id: string;
+  targetMessageId: string;
+  senderId: string;
+  senderName: string;
+  vote: 'confirm' | 'dispute';
+  note: string;
+  timestamp: number;
 }
 
 export interface NetworkState {
