@@ -1,7 +1,7 @@
 
 import React, { createContext, useContext, useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { io, Socket } from 'socket.io-client';
-import { Peer, MeshMessage, NetworkState, MapItem } from './mesh-types';
+import { Peer, MeshMessage, FlagEntry, NetworkState, MapItem } from './mesh-types';
 import { toast } from 'sonner';
 import { WebRTCMesh } from './webrtc-mesh';
 
@@ -11,8 +11,11 @@ interface MeshContextType {
   peers: Peer[];
   ghostPeers: Peer[];
   messages: MeshMessage[];
+  flags: Map<string, FlagEntry[]>;
+  verifiedPeerIds: Set<string>;
   broadcast: (content: string, type?: MeshMessage['type'], metadata?: MeshMessage['metadata']) => void;
   sendDirect: (to: string, content: string, replyTo?: { id: string, content: string }) => void;
+  submitFlag: (targetMessageId: string, vote: 'confirm' | 'dispute', note: string) => void;
   verifyPeer: (id: string) => void;
   isConnected: boolean;
   /** Number of open WebRTC DataChannel connections (true P2P, no server). */
@@ -104,6 +107,16 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const saved = localStorage.getItem('mesh_verified_peer_keys');
     return saved ? JSON.parse(saved) : {};
   });
+  const [flags, setFlags] = useState<Map<string, FlagEntry[]>>(() => {
+    try {
+      const saved = localStorage.getItem('mesh_flags');
+      if (saved) {
+        const arr: [string, FlagEntry[]][] = JSON.parse(saved);
+        return new Map(arr);
+      }
+    } catch {}
+    return new Map<string, FlagEntry[]>();
+  });
   const [isConnected, setIsConnected] = useState(false);
   const [directPeerCount, setDirectPeerCount] = useState(0);
   const [ledgerIntegrity, setLedgerIntegrity] = useState(true);
@@ -126,11 +139,23 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const peersRef = useRef<Peer[]>(peers);
   const messagesRef = useRef<MeshMessage[]>(messages);
   const verifiedPeerIdsRef = useRef<Set<string>>(verifiedPeerIds);
+  const flagsRef = useRef<Map<string, FlagEntry[]>>(flags);
 
   useEffect(() => { meRef.current = me; }, [me]);
   useEffect(() => { peersRef.current = peers; }, [peers]);
   useEffect(() => { messagesRef.current = messages; }, [messages]);
   useEffect(() => { verifiedPeerIdsRef.current = verifiedPeerIds; }, [verifiedPeerIds]);
+  useEffect(() => { flagsRef.current = flags; }, [flags]);
+
+  // Re-broadcast identity when signingKey/encryptionKey arrive (async after socket connects)
+  useEffect(() => {
+    if (me?.signingKey && socketRef.current?.connected) {
+      socketRef.current.emit('peer:update', {
+        signingKey: me.signingKey,
+        encryptionKey: me.encryptionKey,
+      });
+    }
+  }, [me?.signingKey]);
 
   // ── Persistence ───────────────────────────────────────────────────────────
 
@@ -138,6 +163,7 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
   useEffect(() => { localStorage.setItem('mesh_ledger', JSON.stringify(messages)); }, [messages]);
   useEffect(() => { localStorage.setItem('mesh_verified_peers', JSON.stringify(Array.from(verifiedPeerIds))); }, [verifiedPeerIds]);
   useEffect(() => { localStorage.setItem('mesh_verified_peer_keys', JSON.stringify(verifiedPeerKeys)); }, [verifiedPeerKeys]);
+  useEffect(() => { localStorage.setItem('mesh_flags', JSON.stringify(Array.from(flags.entries()))); }, [flags]);
 
   // ── Identity Init ─────────────────────────────────────────────────────────
 
@@ -240,9 +266,12 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const processIncoming = useCallback(async (msg: MeshMessage) => {
     const expectedHash = await hashMessage(msg);
     if (msg.hash !== expectedHash) {
-      setLedgerIntegrity(false);
-      toast.error('Security Warning: Mesh integrity compromised.');
-      return;
+      // Flags use GENESIS_HASH as prevHash and don't participate in the chain — skip integrity fail for them
+      if (msg.type !== 'flag') {
+        setLedgerIntegrity(false);
+        toast.error('Security Warning: Mesh integrity compromised.');
+        return;
+      }
     }
 
     const sender = peersRef.current.find(p => p.id === msg.senderId);
@@ -262,6 +291,27 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
       } catch (e) {
         console.error('Signature verification error', e);
       }
+    }
+
+    // Flag messages go into the flags Map, not the message ledger
+    if (msg.type === 'flag' && msg.metadata?.flagTarget && msg.metadata?.flagVote) {
+      const entry: FlagEntry = {
+        id: msg.id,
+        targetMessageId: msg.metadata.flagTarget,
+        senderId: msg.senderId,
+        senderName: msg.senderName,
+        vote: msg.metadata.flagVote,
+        note: msg.content,
+        timestamp: msg.timestamp,
+      };
+      setFlags(prev => {
+        const next = new Map<string, FlagEntry[]>(prev);
+        const existing: FlagEntry[] = next.get(entry.targetMessageId) ?? [];
+        const filtered = existing.filter(f => f.senderId !== entry.senderId);
+        next.set(entry.targetMessageId, [...filtered, entry]);
+        return next;
+      });
+      return;
     }
 
     setMessages(prev => {
@@ -383,21 +433,38 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
       if (msg.type === 'sync_invitation' && msg.senderId !== meRef.current?.id) {
         s.emit('mesh:sync_response', {
           to: msg.senderId,
-          history: messagesRef.current.filter(m => m.type !== 'direct')
+          history: messagesRef.current.filter(m => m.type !== 'direct'),
+          flagHistory: Array.from(flagsRef.current.entries()),
         });
         return;
       }
-      if (msg.type === 'broadcast' || msg.type === 'alert') {
+      if (msg.type === 'broadcast' || msg.type === 'alert' || msg.type === 'flag') {
         processIncomingRef.current(msg);
       }
     });
 
-    s.on('mesh:receive_sync_response', ({ history }: { history: MeshMessage[] }) => {
+    s.on('mesh:receive_sync_response', ({ history, flagHistory }: { history: MeshMessage[], flagHistory?: Array<[string, FlagEntry[]]> }) => {
       setMessages(prev => {
         const combined = [...prev, ...history];
         const unique = Array.from(new Map(combined.map(m => [m.id, m])).values());
         return unique.sort((a, b) => a.timestamp - b.timestamp).slice(-500);
       });
+      if (flagHistory) {
+        setFlags(prev => {
+          const next = new Map<string, FlagEntry[]>(prev);
+          for (const [msgId, entries] of flagHistory) {
+            const existing: FlagEntry[] = next.get(msgId) ?? [];
+            const merged = new Map<string, FlagEntry>([...existing, ...entries].map(f => [f.senderId, f]));
+            // keep latest per sender
+            for (const entry of entries) {
+              const cur = merged.get(entry.senderId);
+              if (!cur || entry.timestamp > cur.timestamp) merged.set(entry.senderId, entry);
+            }
+            next.set(msgId, Array.from(merged.values()));
+          }
+          return next;
+        });
+      }
       toast.success('Mesh History Synced');
     });
 
@@ -476,7 +543,7 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
   // ── Broadcast ─────────────────────────────────────────────────────────────
 
   const broadcast = useCallback(async (content: string, type: MeshMessage['type'] = 'broadcast', metadata?: MeshMessage['metadata']) => {
-    if (!me || !signingKeyPair.current) return;
+    if (!me) return;
 
     const prevHash = messages.length > 0 ? messages[messages.length - 1].hash : GENESIS_HASH;
 
@@ -495,12 +562,15 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     const hash = await hashMessage(msgTemplate);
 
-    const signatureBuffer = await crypto.subtle.sign(
-      { name: 'ECDSA', hash: { name: 'SHA-256' } },
-      signingKeyPair.current.private,
-      new TextEncoder().encode(hash)
-    );
-    const signature = Array.from(new Uint8Array(signatureBuffer)).join(',');
+    let signature = '';
+    if (signingKeyPair.current) {
+      const signatureBuffer = await crypto.subtle.sign(
+        { name: 'ECDSA', hash: { name: 'SHA-256' } },
+        signingKeyPair.current.private,
+        new TextEncoder().encode(hash)
+      );
+      signature = Array.from(new Uint8Array(signatureBuffer)).join(',');
+    }
 
     const finalMsg: MeshMessage = { ...msgTemplate, hash, signature } as MeshMessage;
 
@@ -647,15 +717,68 @@ export const MeshProvider: React.FC<{ children: React.ReactNode }> = ({ children
     toast.success('Peer Identity Verified');
   }, []);
 
+  // ── Submit Flag ───────────────────────────────────────────────────────────
+
+  const submitFlag = useCallback(async (targetMessageId: string, vote: 'confirm' | 'dispute', note: string) => {
+    if (!me) return;
+
+    // Optimistically add own flag locally — always, even if signing keys aren't ready yet
+    const localEntry: FlagEntry = {
+      id: Math.random().toString(36).substr(2, 9),
+      targetMessageId,
+      senderId: me.id,
+      senderName: me.name,
+      vote,
+      note,
+      timestamp: Date.now(),
+    };
+    setFlags(prev => {
+      const next = new Map<string, FlagEntry[]>(prev);
+      const existing: FlagEntry[] = next.get(targetMessageId) ?? [];
+      const filtered = existing.filter(f => f.senderId !== me.id);
+      next.set(targetMessageId, [...filtered, localEntry]);
+      return next;
+    });
+
+    if (!signingKeyPair.current) return; // can't broadcast without keys, but local state is updated
+
+    // Broadcast the flag as a signed mesh message (prevHash = GENESIS — not in the chain)
+    const msgTemplate: Partial<MeshMessage> = {
+      id: localEntry.id,
+      senderId: me.id,
+      senderName: me.name,
+      content: note,
+      timestamp: localEntry.timestamp,
+      type: 'flag',
+      hops: 1,
+      prevHash: GENESIS_HASH,
+      metadata: { flagTarget: targetMessageId, flagVote: vote },
+    };
+
+    const hash = await hashMessage(msgTemplate);
+    const signatureBuffer = await crypto.subtle.sign(
+      { name: 'ECDSA', hash: { name: 'SHA-256' } },
+      signingKeyPair.current.private,
+      new TextEncoder().encode(hash)
+    );
+    const signature = Array.from(new Uint8Array(signatureBuffer)).join(',');
+    const finalMsg: MeshMessage = { ...msgTemplate, hash, signature } as MeshMessage;
+
+    if (socket && isConnected) {
+      socket.emit('mesh:broadcast', finalMsg);
+    }
+    webrtcRef.current?.broadcast(finalMsg);
+  }, [me, socket, isConnected]);
+
   // ── Memoized Context Value ────────────────────────────────────────────────
 
   const memoedValue = useMemo(() => ({
-    socket, me, peers, ghostPeers, messages, broadcast, sendDirect, verifyPeer,
-    isConnected, directPeerCount, ledgerIntegrity, isStealthMode, setStealthMode,
-    selectedMapItem, setSelectedMapItem
+    socket, me, peers, ghostPeers, messages, flags, verifiedPeerIds, broadcast, sendDirect,
+    submitFlag, verifyPeer, isConnected, directPeerCount, ledgerIntegrity, isStealthMode,
+    setStealthMode, selectedMapItem, setSelectedMapItem
   }), [
-    socket, me, peers, ghostPeers, messages, broadcast, sendDirect, verifyPeer,
-    isConnected, directPeerCount, ledgerIntegrity, isStealthMode, selectedMapItem
+    socket, me, peers, ghostPeers, messages, flags, verifiedPeerIds, broadcast, sendDirect,
+    submitFlag, verifyPeer, isConnected, directPeerCount, ledgerIntegrity, isStealthMode, selectedMapItem
   ]);
 
   return (
