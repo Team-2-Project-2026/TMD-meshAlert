@@ -4,7 +4,7 @@
 
 This contains everything you need to run your app locally.
 
-View your app in AI Studio: [https://ai.studio/apps/e5b2c428-baf0-4a59-acfd-4e7695e1d77c](https://ai.studio/apps/e5b2c428-baf0-4a59-acfd-4e7695e1d77c) / [https://beacon-mesh-offline-emergency-comms-966872913439.us-west1.run.app](https://beacon-mesh-offline-emergency-comms-966872913439.us-west1.run.app)
+View your app in AI Studio: [DEMO](https://beacon-mesh-offline-emergency-comms-966872913439.us-west1.run.app) | [Prev.](https://ai.studio/apps/e5b2c428-baf0-4a59-acfd-4e7695e1d77c)
 
 ## Run Locally
 
